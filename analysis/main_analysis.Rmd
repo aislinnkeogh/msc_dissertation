@@ -1,0 +1,986 @@
+---
+title: "analysis"
+author: "Aislinn Keogh"
+date: "30/06/2021"
+output: html_document
+---
+
+```{r}
+# A place to install packages as needed
+# install.packages('')
+```
+
+```{r message=FALSE}
+library(tidyverse)
+library(gdata)
+library(lme4)
+library(lmerTest)
+library(ggplot2)
+library(cultevo)
+library(vwr)
+library(boot)
+```
+
+```{r}
+theme_set(theme_minimal())
+colour_palette <- c("#228B8E", "#797d7f", "#EF7125")
+colourblind_friendly_palette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+```
+
+```{r}
+load.labs <- c("No load", "Load")
+names(load.labs) <- c("no load", "load")
+```
+
+```{r}
+options(scipen=999)
+```
+
+## Data wrangling
+
+First, find all the csv files in the relevant folder, then separate them into two separate tibbles according to whether they have the "\_debrief" suffix or not. [***N.B. Remember to change working directory as appropriate.***]{.ul}
+
+```{r}
+getwd()
+```
+
+```{r}
+all_files <- list.files(path="./data/main")
+```
+
+Make sure there's no errors in any individual files before trying to concatenate them into one dataframe.
+
+```{r message = FALSE}
+# setwd('data/main')
+# count = 0
+# for (file in all_files) {
+#   read_csv(file, col_names = FALSE, na = 'NA')
+#   print(file)
+#   count = count + 1
+# }
+# print(count)
+```
+
+```{r message=FALSE}
+setwd('data/main')
+data <- all_files[!grepl("_debrief.csv", all_files)] %>% map_df(~read_csv(.,col_names = FALSE, col_types = "ccccccccccccdd", na='NA'))
+```
+
+```{r message=FALSE}
+setwd('data/main')
+debrief_data <- all_files[grepl("_debrief.csv", all_files)] %>% map_df(~read_csv(.,col_names=FALSE))
+```
+
+Add column names and format dataframes.
+
+```{r}
+names(data) <- c('prolific_id', 'structure_condition', 'load_condition', 'block', 'trial_type', 'stimulus', 'shape', 'fill', 'target_word', 'word_typed', 'target_sequence', 'sequence_typed', 'digits_correct', 'response_time')
+
+names(debrief_data) <- c('prolific_id', 'notes', 'comments1', 'comments2')
+```
+
+```{r}
+debrief_data <- select(debrief_data,-c('comments2'))
+```
+
+Replace potentially identifiable Prolific IDs with anonymous random IDs, keeping the link between the two data frames (crucial for exclusion purposes).
+
+```{r}
+id_df <- as_tibble_col(c(data$prolific_id, debrief_data$prolific_id), column_name = "prolific_id") %>% distinct(prolific_id)
+id_df$participant_id <- as.integer(factor(id_df$prolific_id))
+
+# id_df$participant_id <- Map(paste0, 'Participant_', id_df$participant_id)
+```
+
+```{r}
+data <- data %>% inner_join(id_df)
+data <- data %>% relocate(participant_id, .after=prolific_id)
+data <- select(data, -c('prolific_id'))
+
+debrief_data <- debrief_data %>% inner_join(id_df)
+debrief_data <- debrief_data %>% relocate(participant_id, .after=prolific_id)
+debrief_data <- select(debrief_data, -c('prolific_id'))
+```
+
+Exclude any participants who admit to taking written notes.
+
+```{r}
+note_takers <- filter(debrief_data, notes=='yes')$participant_id
+```
+
+```{r}
+data <- filter(data, !(participant_id %in% note_takers))
+```
+
+Other exclusion criteria according to the data/debrief questionnaires from this sample:
+
+-   Only typed numbers for all stimuli in the testing phase (1, \#123)
+
+-   Error in data saving - structure measure doesn't work because the output language is smaller than the meaning space (2, \#140 and \#151)
+
+-   Typed the same word for every stim - structure measure doesn't work because every permutation is the same so the standard deviation is zero (1, \#47)
+
+-   Refreshed part way through and had another go (1, \#67)
+
+```{r}
+participants_to_exclude <- c(140, 47, 151, 123, 67)
+data <- filter(data, !(participant_id %in% participants_to_exclude))
+```
+
+Turn all columns containing categorical variables into factors, making the factors for the two condition columns ordered (so we can tell that e.g. partial is in between holistic and compositional).
+
+```{r}
+data$load_condition <- ifelse(data$load_condition == 'none', 'no load', 'load')
+```
+
+```{r}
+data$structure_condition <- ifelse(data$structure_condition == 'compositional',
+                                   'structured', 
+                                   ifelse(data$structure_condition == 'holistic',
+                                          'unstructured', 'partial'))
+```
+
+```{r}
+data_cols_to_factor <- c('participant_id', 'block', 'trial_type', 'stimulus')
+data <- data %>% mutate_at(data_cols_to_factor, factor)
+
+debrief_data_cols_to_factor <- c('participant_id', 'notes')
+debrief_data <- debrief_data %>% mutate_at(debrief_data_cols_to_factor, factor)
+```
+
+```{r}
+data$load_condition <- factor(data$load_condition, levels = c('no load', 'load'))
+```
+
+```{r}
+data$structure_condition <- factor(data$structure_condition, levels = c('compositional', 'partial', 'holistic'))
+```
+
+Remove any words from the testing block that are obviously not real attempts (e.g. "dontknow") and replace with four-letter strings containing no letters from the input language: this ensures maximum Levenshtein distance where no valid attempt has been made and prevents any NA values being generated (which mess up the Mantel test function).
+
+```{r}
+unique_words <- unique(subset(data, block=="testing")$word_typed)
+for (word in unique_words) {
+  print(word)
+}
+```
+
+```{r - edit this based on the output of unique_words above}
+strings_to_remove <- c('cantremember', 'notsure', 'noidea', 'idk', 'triangle', 'circle', 'ihavenoidea', 'nopesorry', 'thisisimpossible', 'dontknow', 'unsure', '', 'sorrycantremember', 'no', 'na', 'skip')
+data$word_typed <- data$word_typed %>% replace(. %in% strings_to_remove, 'zzzzzz')
+```
+
+```{r}
+data$word_typed <- data$word_typed %>% replace(. == 'tutusomethint', 'tutuzz')
+```
+
+Add column to extract suffixes from input language.
+
+```{r}
+data <- data %>% add_column(suffix = str_sub(data$target_word, 5, 6), .after = "target_word")
+```
+
+Add column to determine whether each word in each input language is an irregular (1) or a regular (0). Returns all zeros for compositional languages, all ones for holistic languages, and a mix of ones (2) and zeros (7) for partial languages.
+
+```{r}
+data <- data %>% group_by(participant_id, suffix) %>% mutate(irregular = ifelse(block == 'training', NA, ifelse(n() == 1, 1, 0))) %>% ungroup()
+
+data <- data %>% relocate(irregular, .after = suffix)
+```
+
+Add column for blunt measure of accuracy in critical trials: was the word correct or not?
+
+```{r}
+data <- data %>% add_column(correct_word = ifelse(data$target_word == data$word_typed, 1, 0), .after="word_typed")
+```
+
+More nuanced measure of accuracy: 1 - edit distance between target word and typed word, normalized for length (following the formula in Atkinson, Smith & Kirby 2018).
+
+```{r}
+target_length <- str_length(data$target_word)
+typed_length <- str_length(data$word_typed)
+longer_string <- pmax(target_length, typed_length)
+
+data <- data %>% mutate(edit_distance = levenshtein.distance(target_word, word_typed), .after=correct_word)
+data <- data %>% mutate(normed_edit_distance = (1 / longer_string) * edit_distance, .after=edit_distance,)
+data <- data %>% mutate(accuracy = 1 - normed_edit_distance, .after=normed_edit_distance)
+```
+
+Functions to compute structure measure (as in Kirby, Cornish & Smith 2011 and Beckner, Pierrehumbert & Hay 2017).
+
+```{r}
+normed.lev.dist <- function(word1, word2) {
+  
+  longer_word <- pmax(str_length(word1), str_length(word2))
+  return((1 / longer_word) * levenshtein.distance(word1, word2))
+}
+
+simple.hamming.dist <- function(meaning1, meaning2) {
+  
+  dist <- (meaning1[[1]] != meaning2[[1]]) + (meaning1[[2]] != meaning2[[2]])
+  return(dist / 2)
+}
+
+language.structure <- function(participant, lg, plt=FALSE) {
+  
+  # Extract relevant columns from dataframe for this participant and arrange tibble
+  if (lg == 'input') {
+    language <- select(filter(data, participant_id==participant & block=='testing'),
+                     stimulus, shape, fill, target_word)
+    names(language)[names(language) == 'target_word'] <- 'word'
+  }
+  else if (lg == 'output') {
+    language <- select(filter(data, participant_id==participant & block=='testing'),
+                     stimulus, shape, fill, word_typed)
+    names(language)[names(language) == 'word_typed'] <- 'word'
+  }
+  
+  language <- arrange(language, stimulus)
+  word <- language$word
+  stim <- language$stimulus
+  shape <- language$shape
+  fill <- language$fill
+  
+  # Create edit distance matrix
+  edit_distance <- sapply(word, normed.lev.dist, word)
+  rownames(edit_distance) <- word
+  colnames(edit_distance) <- word
+  edit_distance <- as.dist(edit_distance)
+  
+  # Create Hamming distance matrix
+  hamming_distance <- matrix(nrow = 9, ncol = 9, byrow = TRUE,
+                             dimnames = list(stim, stim))
+  for (i in 1:length(shape)) {
+    for (j in 1:length(fill)) {
+      hamming_distance[i,j] <- simple.hamming.dist(c(shape[i], fill[i]),
+                                                   c(shape[j], fill[j]))}}
+  hamming_distance <- as.dist(hamming_distance)
+  
+  # Run Mantel test
+  mantel <- mantel.test(edit_distance, hamming_distance, plot = plt,
+                        method = "pearson", trials = 1000)
+  
+  # Calculate standardized z-score, print it and add to Mantel test output
+  z_score <- with(mantel, (statistic - mean) / sd)
+  mantel$z_score <- z_score
+  # print(paste0("Standardized z-score: ", z_score))
+  
+  # Return Mantel test output (minus all 1000 correlation coefficients)
+  return(select(mantel, -rsample))
+}
+```
+
+```{r}
+language.structure(62, lg='output', plt=TRUE)
+```
+
+Compute structure measure for all participants' output languages.
+
+```{r}
+participant_ids <- unique(data$participant_id)
+names(participant_ids) <- as.character(participant_ids)
+```
+
+```{r}
+participant_conditions <- unique(select(data, participant_id, structure_condition, load_condition))
+participant_conditions$participant_id <- as.character(participant_conditions$participant_id)
+```
+
+Checking for errors before constructing the whole dataframe.
+
+```{r}
+for (id in participant_ids) {
+  language.structure(id, lg = 'output', plt = FALSE)
+  print(id)
+}
+```
+
+Then construct the dataframe and join on condition columns.
+
+```{r}
+output_mantel <- map_dfr(participant_ids, language.structure, lg = 'output', .id="participant_ids")
+names(output_mantel)[1] <- "participant_id"
+output_mantel$time <- 'output'
+```
+
+```{r}
+output_mantel <- output_mantel %>% inner_join(participant_conditions)
+output_mantel <- output_mantel %>% relocate(structure_condition, 
+                                          .after = participant_id)
+output_mantel <- output_mantel %>% relocate(load_condition, 
+                                          .after = structure_condition)
+```
+
+Now do the same for input languages.
+
+```{r}
+input_mantel <- map_dfr(participant_ids, language.structure, lg = 'input', .id = 'participant_ids')
+names(input_mantel)[1] <- "participant_id"
+input_mantel$time <- 'input'
+```
+
+```{r}
+input_mantel <- input_mantel %>% inner_join(participant_conditions)
+input_mantel <- input_mantel %>% relocate(structure_condition, 
+                                          .after = participant_id)
+input_mantel <- input_mantel %>% relocate(load_condition, 
+                                          .after = structure_condition)
+```
+
+Then combine the two dataframes.
+
+```{r}
+mantel <- bind_rows(output_mantel, input_mantel)
+```
+
+## Exploring the data
+
+Check how many participants are left after exclusion and how many have been allocated to each condition.
+
+```{r}
+length(unique(data$participant_id))
+```
+
+```{r}
+data %>% group_by(structure_condition, load_condition) %>% summarise(count = n_distinct(participant_id))
+```
+
+Looking at interference trials to check that people are attending to the digit sequence recall task.
+
+```{r}
+subset(data, trial_type=='interference') %>% group_by( structure_condition) %>% summarise(mean_rt = mean(response_time), min_rt = min(response_time), max_rt = max(response_time), mean_digits_correct = mean(digits_correct), sd = sd(digits_correct))
+```
+
+```{r}
+subset(data, trial_type=='interference') %>% summarise(mean_digits_correct = mean(digits_correct), digit_sd = sd(digits_correct), mean_rt = mean(response_time), sd_rt = sd(response_time))
+```
+
+```{r}
+interference <- subset(data, trial_type=='interference') %>% group_by(participant_id, structure_condition) %>% summarise(mean_digits_correct = mean(digits_correct))
+```
+
+```{r}
+ggplot(interference, aes(x=structure_condition, y=mean_digits_correct, 
+                         fill=structure_condition)) +
+  # geom_violin(show.legend = FALSE) +
+  geom_boxplot(color='black', outlier.color='black', show.legend=FALSE) +
+  ylim(0,3) +
+  labs(y='Mean digits correct', x='') +
+  scale_fill_manual(values = colour_palette) +
+  scale_x_discrete(breaks = c("compositional", "partial", "holistic"), 
+                   labels = c("Compositional", "Partial", "Holistic"))
+
+# ggsave("interference_draft.png")
+```
+
+So performance is high across the board. Even the 'outliers' all have a mean of \>2, so doesn't look like anyone was really neglecting this task. Quickly checking that structure is not a significant predictor of performance on this task (as suggested by the means and distributions).
+
+```{r}
+interference_model <- lmer(digits_correct ~ structure_condition + 
+                             (1|participant_id) + (1|target_sequence),
+                           data = subset(data, trial_type == 'interference'),
+                           REML = FALSE)
+
+summary(interference_model)
+```
+
+```{r}
+null_interference_model <- lmer(digits_correct ~  (1|participant_id) +
+                                  (1|target_sequence),
+                           data = subset(data, trial_type == 'interference'),
+                           REML = FALSE)
+
+anova(interference_model, null_interference_model)
+```
+
+Cool, as expected.
+
+What about response times?
+
+```{r}
+ggplot(interference, aes(x = structure_condition, y = mean_rt, fill = structure_condition)) +
+   geom_boxplot(outlier.color='grey', show.legend=FALSE) +
+  labs(title='By-participant mean response times on interference trials', y='mean rt', x='structure condition') +
+  theme_minimal() +
+  scale_fill_brewer(palette='Greens')
+```
+
+```{r}
+arrange(interference, desc(mean_rt))
+```
+
+So there are a couple of participants with some extremely long response times, but these were not the norm across their whole sessions so probably doesn't warrant exclusion.
+
+Next looking at response times on critical trials for all conditions.
+
+```{r}
+filter(data, block=='testing') %>% group_by(participant_id, structure_condition, load_condition) %>% summarise(mean_rt = mean(response_time), min_rt = min(response_time), max_rt = max(response_time)) %>% arrange(desc(max_rt))
+```
+
+```{r}
+grouped_rt <- filter(data, block=='testing') %>% group_by(participant_id, structure_condition, load_condition) %>% summarise(mean_rt = mean(response_time))
+
+ggplot(grouped_rt, aes(x=structure_condition, y=mean_rt, fill=structure_condition)) +
+  facet_wrap(~load_condition) +
+  geom_boxplot(outlier.color='grey', show.legend=FALSE) +
+  labs(title='By-participant mean response times for word recall trials', y='mean response time', x='structure condition') +
+  scale_fill_brewer(palette="Greens")
+```
+
+Some participants' mean response times are unexpectedly high - up to 30 seconds! But even so, it doesn't look like anyone is regularly going away to make a cup of tea during the experiment - the slowest person's max rt was still only just over a minute.
+
+Also interesting that response times are always shorter on average in the load conditions - potentially the feedback on the interference task could be driving this? Doesn't seem to be much difference between structure conditions though.
+
+[***Exclusion can happen here if any of the data suggests some participants need to be excluded e.g. suspiciously short/long response times/performance on digit recall.***]{.ul}
+
+```{r}
+
+```
+
+## Examining the difference between conditions descriptively
+
+```{r}
+testing_trials <- filter(data, block=='testing')
+```
+
+First looking at the binary accuracy measure.
+
+```{r}
+testing_trials %>% group_by(structure_condition, load_condition) %>% summarise(mean_correct = mean(correct_word), sd = sd(correct_word))
+```
+
+```{r}
+binary_measure <- testing_trials %>% group_by(participant_id, structure_condition, load_condition) %>% summarise(mean_correct = mean(correct_word))
+```
+
+So participants are not doing great on this measure across the board, but condition does seem to be making a bit of a difference - compositional conditions are better than non-compositional ones (no real difference between partial and holistic), and no load is consistently better than load.
+
+```{r}
+ggplot(binary_measure, aes(x=structure_condition, y=mean_correct,
+                                          fill=structure_condition)) +
+  facet_grid(. ~ load_condition,
+             labeller = labeller(load_condition = load.labs)) +
+  stat_summary(fun = mean, geom = "bar") +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.1) +
+  labs(y="Mean correct", x="") +
+  ylim(0, 1) +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = colour_palette) +
+  scale_x_discrete(breaks = c("compositional", "partial", "holistic"), 
+                   labels = c("Structured", "Partial", "Unstructured")) +
+   theme(strip.text.x = element_text(size = 11),
+        axis.text.x = element_text(size = 11),
+        axis.title.y = element_text(size = 11))
+
+ggsave("binary_draft.png")
+```
+
+```{r}
+ggplot(binary_measure, aes(x=structure_condition, y=mean_correct,
+                           fill=structure_condition)) +
+  facet_grid(. ~ load_condition,
+             labeller = labeller(load_condition = load.labs)) +
+  geom_violin(show.legend=FALSE) +
+  geom_boxplot(width = 0.1, color = "black") +
+  # stat_summary(fun.data = "mean_sdl", geom = "pointrange", 
+  #              width = 0.1, color = "black") +
+  ylab("Mean correct") +
+  xlab("") +
+  theme(legend.position = "none") +
+  scale_x_discrete(breaks = c("compositional", "partial", "holistic"), 
+                   labels = c("Structured", "Partial", "Unstructured")) +
+  scale_fill_manual(values = colour_palette) +
+  theme(strip.text.x = element_text(size = 11),
+        axis.text.x = element_text(size = 11),
+        axis.title.y = element_text(size = 11))
+
+ggsave("binary_distribution_draft.png")
+```
+
+Next looking at the more nuanced measure of accuracy. First checking the overall mean to see if we've improved on the original experiment design.
+
+```{r}
+testing_trials %>% summarise(mean_accuracy = mean(accuracy))
+```
+
+Phew, that is a lot better. Next grouping by condition.
+
+```{r}
+testing_trials %>% group_by(structure_condition, load_condition) %>% summarise(mean_accuracy = mean(accuracy), sd = sd(accuracy))
+```
+
+So on both measures of accuracy, it looks like partially structured languages are harder than holistic ones, regardless of load, but the difference is very small. But compositional languages are considerably better in both load and no load conditions, phew!
+
+Next checking what's going on in the distributions.
+
+```{r}
+testing_trials_by_participant <- testing_trials %>% group_by(participant_id, load_condition, structure_condition) %>% summarise(participant_accuracy = mean(accuracy))
+```
+
+```{r}
+ggplot(testing_trials_by_participant, aes(x=load_condition, y=participant_accuracy,
+                                          fill=load_condition)) +
+  facet_wrap(~structure_condition) +
+  geom_boxplot(outlier.color='grey', show.legend=FALSE) +
+  labs(title="By-participant mean accuracy on critical trials", y="accuracy", x="load condition") +
+   scale_fill_brewer(palette="Greens")
+```
+
+```{r}
+ggplot(testing_trials_by_participant, aes(x=structure_condition, 
+                                          y=participant_accuracy, 
+                                          fill=structure_condition)) +
+  facet_wrap(~load_condition) +
+  geom_boxplot(outlier.color='grey', show.legend=FALSE) +
+  labs(title="By-participant mean accuracy on critical trials", y="accuracy", x="structure condition") +
+  scale_fill_brewer(palette="Greens")
+```
+
+```{r}
+ggplot(testing_trials_by_participant, aes(x=structure_condition, 
+                                          y=participant_accuracy,
+                                          fill=structure_condition)) +
+  facet_grid(. ~ load_condition,
+             labeller = labeller(load_condition = load.labs)) +
+  geom_violin(show.legend=FALSE) +
+  geom_boxplot(width = 0.1, color = "black") +
+  # stat_summary(fun.data = "mean_sdl", geom = "pointrange", 
+  #              width = 0.1, color = "black") +
+  ylab("Mean similarity") +
+  xlab("") +
+  theme(legend.position = "none") +
+  scale_x_discrete(breaks = c("compositional", "partial", "holistic"), 
+                   labels = c("Structured", "Partial", "Unstructured")) +
+  scale_fill_manual(values = colour_palette) +
+  theme(strip.text.x = element_text(size = 11),
+        axis.text.x = element_text(size = 11),
+        axis.title.y = element_text(size = 11))
+
+ggsave("similarity_distribution_draft.png")
+```
+
+```{r}
+ggplot(testing_trials_by_participant,
+       aes(x = structure_condition, y = participant_accuracy, 
+           fill = structure_condition)) +
+  facet_grid(. ~ load_condition,
+             labeller = labeller(load_condition = load.labs)) +
+  stat_summary(fun = mean, geom = "bar") +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.1) +
+  ylab("Mean similarity") +
+  xlab("") +
+  ylim(0, 1) +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = colour_palette) +
+  scale_x_discrete(breaks = c("compositional", "partial", "holistic"), 
+                   labels = c("Structured", "Partial", "Unstructured")) +
+  theme(strip.text.x = element_text(size = 11),
+        axis.text.x = element_text(size = 11),
+        axis.title.y = element_text(size = 11))
+
+ggsave("similarity_draft.png")
+```
+
+```{r}
+ggplot(testing_trials_by_participant,
+       aes(x = load_condition, y = participant_accuracy, 
+           fill = load_condition)) +
+  facet_wrap(~structure_condition) +
+  stat_summary(fun = mean, geom = "bar") +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.1) +
+  ylab("Accuracy") +
+  xlab("Load condition") +
+  ggtitle("By-participant mean accuracy on critical trials") +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = colourblind_friendly_palette) 
+```
+
+So generally there's a lot more variation in load conditions, while no load conditions have clearer peaks (which are all fairly high, regardless of structure). Generally it looks like there's no real difference between holistic/partial languages, but there is a difference between compositional and the rest.
+
+```{r}
+testing_trials_by_condition_similarity <- testing_trials %>% group_by(load_condition, structure_condition) %>% summarise(
+  mean_accuracy = mean(accuracy),
+  sd = sd(accuracy),
+  n = n_distinct(participant_id),
+  SE = sd / sqrt(n),
+  lower.ci = mean_accuracy - qt(1 - (0.05 / 2), n - 1) * SE,
+  upper.ci = mean_accuracy + qt(1 - (0.05 / 2), n - 1) * SE)
+```
+
+```{r}
+testing_trials_by_condition_binary <- testing_trials %>% group_by(load_condition, structure_condition) %>% summarise(
+  mean_correct = mean(correct_word),
+  sd = sd(correct_word),
+  n = n_distinct(participant_id),
+  SE = sd / sqrt(n),
+  lower.ci = mean_correct - qt(1 - (0.05 / 2), n - 1) * SE,
+  upper.ci = mean_correct + qt(1 - (0.05 / 2), n - 1) * SE
+)
+```
+
+```{r}
+ggplot(testing_trials_by_condition_binary, aes(x=structure_condition, y=mean_correct,
+                                        group=load_condition)) +
+  geom_line(aes(color=load_condition), size=0.75) +
+  geom_point(aes(color=load_condition), size=3) +
+  geom_errorbar(aes(x=structure_condition, ymin=lower.ci, ymax=upper.ci, 
+                    color=load_condition), size=0.75, width=0.1) +
+  scale_color_manual(labels = c("No load", "Load"),
+                     values = c("#E69F00", "#009E73")) +
+  scale_x_discrete(breaks = c("compositional", "partial", "holistic"), 
+                   labels = c("Structured", "Partial", "Unstructured")) +
+  xlab("") +
+  ylab("Mean correct") +
+  ylim(0, 1) +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(size = 10),
+        legend.position = c(0.1, 0.2),
+        axis.title.y = element_text(size = 11),
+        axis.text.x = element_text(size = 11))
+
+ggsave("binary_differential_draft.png")
+```
+
+```{r}
+ggplot(testing_trials_by_condition_similarity, aes(x=structure_condition, y=mean_accuracy,
+                                        group=load_condition)) +
+  geom_line(aes(color=load_condition), size=0.75) +
+  geom_point(aes(color=load_condition), size=3) +
+  geom_errorbar(aes(x=structure_condition, ymin=lower.ci, ymax=upper.ci, 
+                    color=load_condition), size=0.75, width=0.1) +
+  scale_color_manual(labels = c("No load", "Load"),
+                     values = c("#E69F00", "#009E73")) +
+  scale_x_discrete(breaks = c("compositional", "partial", "holistic"), 
+                   labels = c("Structured", "Partial", "Unstructured")) +
+  xlab("") +
+  ylab("Mean similarity") +
+  ylim(0, 1) +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(size = 10),
+        legend.position = c(0.1, 0.2),
+        axis.title.y = element_text(size = 11),
+        axis.text.x = element_text(size = 11))
+
+ggsave("similarity_differential_draft.png")
+```
+
+```{r}
+ggplot(testing_trials_by_condition, aes(x=load_condition, y=mean_accuracy,
+                                        group=structure_condition)) +
+  geom_line(aes(color=structure_condition), size=0.75) +
+  geom_point(aes(color=structure_condition), size=3) +
+  geom_errorbar(aes(x=load_condition, ymin=lower.ci, ymax=upper.ci, 
+                    color=structure_condition, alpha=0.1), size=0.75, width=0.1) +
+  # scale_color_manual(labels = c("No load", "Load"),
+  #                    values = c("#E69F00", "#CC79A7")) +
+  # scale_x_discrete(breaks = c("compositional", "partial", "holistic"), 
+  #                  labels = c("Compositional", "Partial", "Holistic")) +
+  xlab("") +
+  ylab("Accuracy") +
+  ylim(0, 1) +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(size = 10),
+        legend.position = c(0.1, 0.2),
+        axis.title.y = element_text(size = 11),
+        axis.text.x = element_text(size = 11))
+```
+
+Quick look at how structured the output languages are by condition (this probably isn't the best thing to look at for the final analysis).
+
+```{r}
+mantel %>% subset(time == 'output') %>% group_by(structure_condition, load_condition) %>% summarise(mean_z = mean(z_score))
+```
+
+Uh oh, z-scores are higher across the board for no load conditions, so it looks like the way load learners are failing to learn is not by introducing more structure to the unstructured languages. In fact we have the opposite pattern even: languages emerging under no load are significantly structured across the board (z \> 1.96), while under load only the languages that started off structured are structured in the output, and even then less so than in the no load condition. And structure decreases compared to the input in every single condition. Sad face.
+
+```{r}
+mantel_grouped <- mantel %>% group_by(load_condition, structure_condition, time) %>%
+  summarise(mean_z = mean(z_score),
+            sd = sd(z_score),
+            n = n_distinct(participant_id),
+            SE = sd / sqrt(n),
+            lower.ci = mean_z - qt(1 - (0.05 / 2), n - 1) * SE,
+            upper.ci = mean_z + qt(1 - (0.05 / 2), n - 1) * SE)
+```
+
+```{r}
+ggplot(mantel_grouped, aes(x=time, y=mean_z, group=structure_condition)) +
+  facet_wrap(~load_condition, labeller = labeller(load_condition = load.labs)) +
+  geom_line(aes(color=structure_condition), size=0.75) +
+  geom_point(aes(color=structure_condition), size=3) +
+  geom_errorbar(aes(x=time, ymin=lower.ci, ymax=upper.ci, 
+                    color=factor(structure_condition)), size=0.75, width=0.1) +
+  geom_hline(yintercept=1.96, linetype=5) +
+  # labs(color = "Structure condition") +
+  xlab("") +
+  ylab("Structure score") +
+  theme_bw() +
+  scale_color_manual(labels = c("Structured", "Partial", "Unstructured"),
+                     values = colour_palette) +
+  scale_x_discrete(breaks = c("input", "output"), 
+                   labels = c("Input", "Output")) +
+  theme(strip.text.x = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(size = 11),
+        axis.title.y = element_text(size = 11),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 10),
+        legend.position = c(0.15, 0.175))
+
+ggsave("mantel_draft.png")
+```
+
+## Significance testing the difference between conditions
+
+```{r}
+helmert<-function(x=NULL,n=NULL){
+  
+  if(is.null(x)&is.null(n)){
+    error <- "Error: provide atleast one argument"
+    return(error)
+  }else if(!is.null(x)){
+    if(!is.factor(x)){
+      error <- "Error: x should be a factor or ordered factor"
+      return(error)
+    } else{
+     levels <- length(levels(x)) 
+    }
+  } else{
+levels <- n 
+}
+row <- NULL
+
+for(i in 0:(levels-2)){
+  row <- cbind(row,c(rep(0,i),((levels-(i+1))/(levels-i)),rep(-1/(levels-i),levels-((i+1)))))
+}
+
+if(!is.null(x)){
+rownames(row) <- levels(x)
+} else{
+  rownames(row) <- levels(x) 
+}
+row
+}
+```
+
+```{r}
+contrasts <- helmert(x=data$structure_condition)
+```
+
+### Overall learnability
+
+Are the load and structure condition terms significant on both measures of accuracy?
+
+First, the binary measure.
+
+```{r}
+binary_model <- glmer(correct_word ~ load_condition + structure_condition +
+                        (1|participant_id),
+                      data = subset(data, block == 'testing'),
+                      family = "binomial",
+                      contrasts = list(structure_condition = contrasts),
+                      control=glmerControl(optimizer="bobyqa", 
+                                           optCtrl=list(maxfun=1e4)))
+
+summary(binary_model)
+```
+
+```{r}
+binary_model_null_load <- glmer(correct_word ~ 
+                                  structure_condition + 
+                                  (1|participant_id),
+                      data = subset(data, block == 'testing'),
+                      family = "binomial",
+                      contrasts = list(structure_condition = contrasts),
+                      control=glmerControl(optimizer="bobyqa", 
+                                           optCtrl=list(maxfun=1e4)))
+
+anova(binary_model, binary_model_null_load)
+```
+
+```{r}
+binary_model_null_structure <- glmer(correct_word ~ 
+                                  load_condition + 
+                                  (1|participant_id),
+                      data = subset(data, block == 'testing'),
+                      family = "binomial",
+                      control=glmerControl(optimizer="bobyqa", 
+                                           optCtrl=list(maxfun=1e4)))
+
+anova(binary_model, binary_model_null_structure)
+```
+
+Next, the similarity measure.
+
+```{r}
+similarity_model <- lmer(accuracy ~ load_condition + structure_condition +
+                           (1|participant_id),
+               data=subset(data, block=='testing'),
+               contrasts = list(structure_condition = contrasts),
+               REML=FALSE)
+
+summary(similarity_model)
+```
+
+```{r}
+similarity_model_null_load <- lmer(accuracy ~ structure_condition +
+                                     (1|participant_id),
+               data=subset(data, block=='testing'),
+               contrasts = list(structure_condition = contrasts),
+               REML=FALSE)
+
+anova(similarity_model, similarity_model_null_load)
+```
+
+```{r}
+similarity_model_null_structure <- lmer(accuracy ~ load_condition +
+                           (1|participant_id),
+               data=subset(data, block=='testing'),
+               REML=FALSE)
+
+anova(similarity_model, similarity_model_null_structure)
+```
+
+**Testing whether effect of structure really is non-linear - need to check whether a polynomial term for structure is significant/better fit than linear, but how to do this for categorical variable?**
+
+```{r}
+
+```
+
+### Interaction between load and structure
+
+Is the interaction term between load and structure significant on both measures of accuracy?
+
+First, the binary measure.
+
+```{r}
+binary_model_interaction <- glmer(correct_word ~ load_condition +
+                                    structure_condition +
+                                    load_condition:structure_condition +
+                        (1|participant_id),
+                      data = subset(data, block == 'testing'),
+                      family = "binomial",
+                      contrasts = list(structure_condition = contrasts),
+                      control=glmerControl(optimizer="bobyqa", 
+                                           optCtrl=list(maxfun=1e4)))
+
+summary(binary_model_interaction)
+```
+
+```{r}
+binary_model_interaction_null <- glmer(correct_word ~ load_condition +
+                                    structure_condition +
+                        (1|participant_id),
+                      data = subset(data, block == 'testing'),
+                      family = "binomial",
+                      contrasts = list(structure_condition = contrasts),
+                      control=glmerControl(optimizer="bobyqa", 
+                                           optCtrl=list(maxfun=1e4)))
+
+anova(binary_model_interaction, binary_model_interaction_null)
+```
+
+Next, the similarity measure.
+
+```{r}
+similarity_model_interaction <- lmer(accuracy ~ load_condition + 
+                                       structure_condition +
+                                       load_condition:structure_condition +
+                                       (1|participant_id),
+               data=subset(data, block=='testing'),
+               contrasts = list(structure_condition = contrasts),
+               REML=FALSE)
+
+summary(similarity_model_interaction)
+```
+
+```{r}
+similarity_model_interaction_null <- lmer(accuracy ~ load_condition + 
+                                            structure_condition +
+                                            (1|participant_id),
+               data=subset(data, block=='testing'),
+               contrasts = list(structure_condition = contrasts),
+               REML=FALSE)
+
+anova(similarity_model_interaction, similarity_model_interaction_null)
+```
+
+### The effect of working memory
+
+Are the output languages of load learners more structured than those of no load learners?
+
+```{r}
+mantel_model <- lm(z_score ~ load_condition + structure_condition,
+                   contrasts = list(structure_condition = contrasts),
+                   data = subset(mantel, time=="output"))
+
+summary(mantel_model)
+```
+
+So load is a significant predictor of how structured the output language will be, but in the wrong direction (negative coefficient for load compared to no load means structure is significantly lower in those conditions).
+
+Are output languages significantly less structured than inputs?
+
+```{r}
+mantel_model_time <- lm(z_score ~ load_condition + structure_condition + time,
+                     contrasts = list(structure_condition = contrasts),
+                     data = mantel)
+
+summary(mantel_model_time)
+```
+
+```{r}
+mantel_model_null_time <- lm(z_score ~ load_condition + structure_condition,
+                   data = mantel)
+
+anova(mantel_model_time, mantel_model_null_time)
+```
+
+Why yes, yes they are.
+
+Is the regularity of items a good predictor of how well they were learned?
+
+```{r}
+item_model <- lmer(accuracy ~ irregular * load_condition + (1|participant_id),
+                    data=subset(data, block=='testing'),
+                    REML=FALSE)
+
+summary(item_model)
+```
+
+```{r}
+item_model_null <- lmer(accuracy ~ load_condition + irregular + (1|participant_id),
+                    data=subset(data, block=='testing'),
+                    REML=FALSE)
+
+anova(item_model, item_model_null)
+```
+
+So irregulars are learned worse for all participants (negative coefficient but not significant) but the interaction term between load condition and regularity is not significant: the effect of item regularity on accuracy does not differ depending on load.
+
+```{r}
+item_model_binary <- glmer(correct_word ~ load_condition * irregular +
+                             (1|participant_id),
+                           data = subset(data, block == 'testing'),
+                           family = "binomial",
+                           control=glmerControl(optimizer="bobyqa", 
+                                                optCtrl=list(maxfun=1e4)))
+
+summary(item_model_binary)
+```
+
+```{r}
+item_model_binary_null <- glmer(correct_word ~ load_condition + irregular +
+                             (1|participant_id),
+                           data = subset(data, block == 'testing'),
+                           family = "binomial",
+                           control=glmerControl(optimizer="bobyqa", 
+                                                optCtrl=list(maxfun=2e5)))
+
+summary(item_model_binary_null)
+```
+
+**Don't know what to make of the fact that the model without the interaction term has failed to converge???**
+
+```{r}
+anova(item_model_binary, item_model_binary_null)
+```
