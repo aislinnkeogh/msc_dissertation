@@ -38,9 +38,18 @@ names(load.labs) <- c("no load", "load")
 [**N.B. If you have downloaded the three data files from the Git Repository, the next cell is all you will need to run the rest of the analysis from the section titled 'Exploring the Data' onwards. The rest of the cells in this section show how these data frames were constructed initially.**]{.ul}
 
 ```{r}
-# data <- read_csv("experiment_data.csv", col_types = "ccccccccccccdd", na='NA')
-# debrief_data <- read_csv("debrief_data.csv", col_types = "", na = "NA")
-# mantel <- read_csv("mantel.csv")
+# data <- read_csv("./data/experiment_data.csv", col_types = "dcccccccccdcdddddddd", na='NA')
+# debrief_data <- read_csv("./data/debrief_data.csv", col_types = "dcc", na = "NA")
+# mantel <- read_csv("./data/mantel.csv")
+
+# data_cols_to_factor <- c('participant_id', 'block', 'trial_type', 'stimulus')
+# data <- data %>% mutate_at(data_cols_to_factor, factor)
+# 
+# debrief_data_cols_to_factor <- c('participant_id', 'notes')
+# debrief_data <- debrief_data %>% mutate_at(debrief_data_cols_to_factor, factor)
+# 
+# data$load_condition <- factor(data$load_condition, levels = c('no load', 'load'))
+# data$structure_condition <- factor(data$structure_condition, levels = c('structured', 'partial', 'unstructured'))
 ```
 
 First, find all the csv files in the relevant folder.
@@ -85,9 +94,6 @@ Add column names and format dataframes.
 names(data) <- c('prolific_id', 'structure_condition', 'load_condition', 'block', 'trial_type', 'stimulus', 'shape', 'fill', 'target_word', 'word_typed', 'target_sequence', 'sequence_typed', 'digits_correct', 'response_time')
 
 names(debrief_data) <- c('prolific_id', 'notes', 'comments1', 'comments2')
-```
-
-```{r}
 debrief_data <- select(debrief_data,-c('comments2'))
 ```
 

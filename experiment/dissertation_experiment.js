@@ -1,4 +1,4 @@
-/*** NEW CLASSES TO MAKE DICTIONARY OBJECTS ***/
+/*** NEW CLASSES TO MAKE DICTIONARY STYLE OBJECTS ***/
 
 class Language {
     constructor() {
@@ -42,6 +42,7 @@ var fill_patterns = ["checkerboard", "striped", "spotted"]
 
 var stim_list = []
 for (var i = 1; i < 10; i++) {
+  // Change this path if the stimuli are saved somewhere different on your server
   stim_list.push("stimuli/stim0" + i + ".png")
 }
 
@@ -90,14 +91,12 @@ function make_language(structure, shapes, fill_patterns, shape_syllables, fill_s
     fill_syllables = jsPsych.randomization.shuffle(fill_syllables)
   } while ((shape_syllables.indexOf("lala") == fill_syllables.indexOf("va")) || (shape_syllables.indexOf("lala") < dim && fill_syllables.indexOf("va") < dim))
 
-  // If holistic, randomly pair shape and fill syllables without replacement and add them to the dictionary (line 100)
-  // If holistic, pick a syllable per shape and then randomly pair these with all nine fill fill_syllables (line 101)
+  // If holistic, pick a syllable per shape and then randomly pair these with all nine fill fill_syllables
   if (structure == 'holistic') {
     language = new Language()
     k = 0
     for (var i = 0; i < dim; i++) {
       for (var j = 0; j < dim; j++) {
-        // language.set(shapes[i], fill_patterns[j], (shape_syllables[k] + fill_syllables[k]))
         language.set(shapes[i], fill_patterns[j], (shape_syllables[i] + fill_syllables[k]))
         k++
       }
@@ -120,28 +119,11 @@ function make_language(structure, shapes, fill_patterns, shape_syllables, fill_s
     var fill_exception_indices = jsPsych.randomization.shuffle([...Array(dim).keys()])
     var fill_syllables = fill_syllables.slice(dim)
 
-    language.set(shapes[shape_exception_indices[0]], fill_patterns[fill_exception_indices[0]], (shape_syllables[shape_exception_indices[0]] + fill_syllables[0]))
-    // Use line below to get two exception words such that there is one perfect row and one perfect column and exceptions in all the others
-    language.set(shapes[shape_exception_indices[1]], fill_patterns[fill_exception_indices[1]], (shape_syllables[shape_exception_indices[1]] + fill_syllables[1]))
+    for (var i = 0; i < 2; i++) {
+      language.set(shapes[shape_exception_indices[i]], fill_patterns[fill_exception_indices[i]], (shape_syllables[shape_exception_indices[i]] + fill_syllables[i]))
+    }
     }
   }
-
-  //   if (structure == 'partial') {
-  //     // Randomly pick three cells in the grid (shape = x coordinate, fill = y coordinate) such that no two are in the same row or column, then
-  //     // get rid of the syllables already used in the compositional language and combine the next three in each array to make the exception words
-  //     // and insert them in the right place
-  //     var shape_exception_indices = [...Array(dim).keys()]
-  //     var shape_exception_indices = jsPsych.randomization.shuffle([...Array(dim).keys()])
-  //     var fill_exception_indices = jsPsych.randomization.shuffle([...Array(dim).keys()])
-  //
-  //     var shape_syllables = shape_syllables.slice(dim)
-  //     var fill_syllables = fill_syllables.slice(dim)
-  //
-  //     for (var i = 0; i < dim; i++) {
-  //       language.set(shapes[shape_exception_indices[i]], fill_patterns[fill_exception_indices[i]], (shape_syllables[i] + fill_syllables[i]))
-  //     }
-  //   }
-  // }
 
   return language
 }
@@ -150,6 +132,7 @@ function make_language(structure, shapes, fill_patterns, shape_syllables, fill_s
 /*** PSEUDO-RANDOM DIGIT SEQUENCES ***/
 
 function check_sequence(seq) {
+  // Returns true if a sequence does not contain any sub-sequences where a number n is neighboured on either side by n-1 or n+1
   for (var i = 0; i < seq.length - 1; i++) {
     if ((seq[i+1] == seq[i] + 1) || (seq[i+1] == seq[i] - 1)) {
       return false
@@ -158,6 +141,7 @@ function check_sequence(seq) {
 }
 
 function generate_sequence(seq_len) {
+  // Generates number sequences until one meets the criteria above
   var range = []
   for (var i = 0; i < 10; i++) {
     range.push(i)
@@ -172,14 +156,17 @@ function generate_sequence(seq_len) {
 /*** UTILITY FUNCTIONS ***/
 
 function normalize_word(word) {
+  // Removes punctuations, digits and spaces and sends to lower case
   return word.replace(/[^\w]/g, '').trim().toLowerCase()
 }
 
 function normalize_sequence(seq) {
+  // Removes punctuation, letters and spaces
   return seq.replace(/[^\d]/g, '').trim()
 }
 
 function normalize_filename(filepath) {
+  // Returns filenames of the type 'stim01' without path information
   var folder = "stimuli/"
   var file_extension = ".png"
   return filepath.replace(folder, '').replace(file_extension, '')
@@ -188,50 +175,16 @@ function normalize_filename(filepath) {
 
 /*** CONDITION ALLOCATION ***/
 
-// For pilot #1
-// var load_conditions = ['none', 'low']
-// var structure_conditions = ['partial']
+var load_conditions = ['none', 'low']
+var structure_conditions = ['holistic', 'partial', 'compositional']
 
-// For pilot #2
-// var load_conditions = ['high']
-// var structure_conditions = ['partial']
-
-// For pilot #3
-// var load_conditions = ['none', 'high']
-// var structure_conditions = ['partial']
-
-// For full experiment (3x3)
-// var load_conditions = ['none', 'low', 'high']
-// var structure_conditions = ['holistic', 'partial', 'compositional']
-
-// For full experiment (2x3)
-// var load_conditions = ['none', 'low']
-// var structure_conditions = ['holistic', 'partial', 'compositional']
-
-// Extra participants
-var load_conditions = ['low']
-var structure_conditions = ['compositional']
 
 var allocated_condition = {'load': jsPsych.randomization.shuffle(load_conditions)[0],
                            'structure': jsPsych.randomization.shuffle(structure_conditions)[0]}
-// console.log(allocated_condition)
 
 var load = allocated_condition['load']
 var language_type = allocated_condition['structure']
 var language = make_language(language_type, shapes, fill_patterns, shape_syllables, fill_syllables)
-// console.log(language)
-
-// Check if conditions are being allocated roughly evenly
-// var allocated_load = {'none': 0, 'low': 0, 'high': 0}
-// var allocated_structure = {'holistic': 0, 'partial': 0, 'compositional': 0}
-// for (var i = 0; i < 100; i++) {
-//   var allocated_condition = {'load': jsPsych.randomization.shuffle(load_conditions)[0],
-//                              'structure': jsPsych.randomization.shuffle(structure_conditions)[0]}
-//   allocated_load[allocated_condition['load']]++
-//   allocated_structure[allocated_condition['structure']]++
-// }
-// console.log(allocated_load)
-// console.log(allocated_structure)
 
 
 /*** TRAINING PHASE ***/
@@ -300,6 +253,7 @@ function make_training_trial(stim, word, load, response_type) {
                            choices: jsPsych.NO_KEYS,
                            trial_duration: 2000}
 
+  // Active training was not used in this experiment run but the code is here if needed
   if (response_type == 'retype') {
     var active_training = {type: 'survey-html-form',
                            html: "<img src=" + stim + " width=" + stim_width + "px height=" + stim_height + "px><br>\
@@ -403,14 +357,6 @@ function make_training_trial(stim, word, load, response_type) {
 }
 
 function make_training_block(stim_list, language, load, n_repetitions) {
-  // var pause_screen = {type: 'html-button-response',
-  //                     stimulus: "<p>Time for a short break. Click below when you're ready to continue.</p>",
-  //                     choices: ['Next']}
-  //
-  // var next_screen = {type: 'html-button-response',
-  //                    stimulus: "<p>Let's have another look at those words.</p>",
-  //                    choices: ['Click here to continue']}
-
   var next_screen = {type: 'html-keyboard-response',
                      stimulus: "<p>Let's have another look at those words.</p>\
                                 <p>Remember you'll be tested on all the words at the end!</p>",
@@ -434,6 +380,7 @@ function make_training_block(stim_list, language, load, n_repetitions) {
   return training_block.flat().slice(0,-1)
 }
 
+// Change the final argument here if you want to do more/fewer rounds of training
 var training_block = make_training_block(stim_list, language, load, 6)
 
 var random_stim = jsPsych.randomization.sampleWithoutReplacement(stim_list, 1)[0]
@@ -664,6 +611,5 @@ jsPsych.init({
     timeline: full_timeline,
     show_progress_bar: true,
     on_finish: function(){
-      // jsPsych.data.displayData('csv')
       window.location = 'https://app.prolific.co/submissions/complete?cc=747132B9'
     }})
